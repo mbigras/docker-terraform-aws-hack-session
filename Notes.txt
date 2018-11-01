@@ -1,0 +1,77 @@
+grep '^-' 'Terraform AWS IAM hack session.txt'
+
+mkdir docker-terraform-aws-hack-session
+
+- Tools
+
+terraform
+awscli
+jq
+lpass
+
+- Start from a clean docker environment
+
+docker ps -aq | xargs docker rm -f && docker images -aq | xargs docker rmi -f # docker clobber
+docker ps -a && docker images -a # docker massive list
+
+- Create container
+
+docker run -itd --name terraform mbigras/terraform-aws-hack-session
+docker attach terraform
+
+- Recover credentials - failed
+
+read email
+lpass login $email
+Error: Peer certificate cannot be authenticated with given CA certificates.
+
+https://github.com/lastpass/lastpass-cli/issues/197
+https://github.com/lastpass/lastpass-cli/issues/409
+
+- Update to alpine 3.8 to get a more recent lastpass-cli package
+
+lpass --version
+LastPass CLI v1.3.0
+
+- Recover credentials - failed
+- Update to alpine edge to get a more recent lastpass-cli package
+- Recover credentials
+
+read email
+lpass login $email
+mkdir ~/.aws
+lpass show --notes aws/root-credentials | awk 'BEGIN { print "[default]" } { print }' > ~/.aws/credentials
+
+- IAM resource hack session
+
+aws iam get-user
+aws iam list-users | jq -r '.Users[] | .UserName'
+aws iam list-groups | jq -r '.Groups[] | .GroupName'
+aws iam create-user --user-name alice
+aws iam list-access-keys --user-name alice
+aws iam create-access-key --user-name alice | jq -r '.AccessKey | "aws_access_key_id=\(.AccessKeyId)\naws_secret_access_key=\(.SecretAccessKey)"' | awk 'BEGIN { print "[alice]" } { print }' | tee -a ~/.aws/credentials
+aws --profile alice iam get-user
+aws iam list-groups | jq -r '.Groups[] | .GroupName'
+aws iam create-group --group-name readonly
+aws iam attach-group-policy --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess --group-name readonly
+aws iam add-user-to-group --group-name readonly --user-name alice
+aws --profile alice iam get-user
+for user in $(aws iam list-users | jq -r '.Users[] | select(.UserName != "root") | .UserName'); do
+	for key in $(aws iam list-access-keys --user-name $user | jq -r '.AccessKeyMetadata[] | .AccessKeyId'); do
+		aws iam delete-access-key --user-name $user --access-key-id $key
+	done
+	for group in $(aws iam list-groups-for-user --user-name $user | jq -r '.Groups[] | .GroupName'); do
+		aws iam remove-user-from-group --user-name $user --group-name $group
+	done
+	aws iam delete-user --user-name $user
+done
+for group in $(aws iam list-groups | jq -r '.Groups[] | select(.GroupName != "root") | .GroupName'); do
+	for policy in $(aws iam list-attached-group-policies --group-name $group | jq -r '.AttachedPolicies[] | .PolicyArn'); do
+		aws iam detach-group-policy --group-name $group --policy-arn $policy
+	done
+	aws iam delete-group --group-name $group
+done
+
+- Extract access keys from terraform.tfstate file
+
+jq -r '.modules[0].resources."aws_iam_access_key.terraform".primary.attributes | "aws_access_key_id=\(.id)\naws_secret_access_key=\(.secret)"' terraform.tfstate | awk 'BEGIN { print "[terraform]" } { print }' | tee -a ~/.aws/credentials
